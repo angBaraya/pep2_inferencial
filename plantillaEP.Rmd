@@ -1,0 +1,65 @@
+---
+title: "EI-EPXX-respuesta-equipo-X"
+author: "-"
+date: "YYYY-MM-DD"
+output:
+  html_document:
+    toc: true # Activa la tabla de contenidos (índice)
+    toc_float: true # Permite que el índice se mueva al hacer scroll
+    toc_depth: 3 # Define la cantidad de niveles de títulos
+    theme: flatly # Tema visual (bootstrap)
+    highlight: tango # Define el estilo del código (colores)
+    df_print: paged # Hace paginado al mostrar data frames
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo      = TRUE, # Muestra código R en el documento
+  warning   = FALSE, # Oculta advertencias
+  message   = FALSE, # Oculta mensajes (como los de carga de paquetes)
+  fig.align = "center", # Centra imágenes
+  fig.width = 7,
+  fig.height = 4 # Parámetros para el tamaño de gráficas
+)
+```
+
+
+---
+
+# Contexto
+
+
+# Pregunta 1
+
+> **Texto de ejemplo**
+
+## Selección de la prueba
+
+## Formulación de hipótesis
+
+## Prueba estadística
+
+```{r}
+a <- 10
+```
+
+## Conclusiones
+
+# Pregunta 2
+
+> **Texto de ejemplo**
+
+## Selección de la prueba
+
+## Formulación de hipótesis
+
+## Prueba estadística
+
+```{r}
+b <- 20
+```
+
+## Conclusiones
+
+
+# Referencias

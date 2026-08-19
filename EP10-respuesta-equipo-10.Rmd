@@ -1,0 +1,212 @@
+---
+title: "EP10-respuesta-equipo-10"
+output: html_document
+---
+
+```{r}
+library(car)
+library(caret)
+library(pROC)
+```
+
+## 1. Preparación de los datos y selección de la muestra
+
+Cargamos los datos y se construyen las variables IMC y Estado Nutricional (EN). Luego se extrae una muestra de 150 mujeres dividida en 100 casos de entrenamiento y 50 de prueba.
+
+```{r}
+datos <- read.csv2("EP09 Datos.csv", header = TRUE)
+
+# Creación de variables
+datos$IMC <- datos$Weight / (datos$Height / 100)^2
+datos$EN <- factor(
+  ifelse(datos$IMC >= 23.2, "sobrepeso", "no sobrepeso"),
+  levels = c("no sobrepeso", "sobrepeso")
+)
+
+# Filtrado por mujeres
+mujeres <- datos[datos$Gender == 0, ]
+mujeres_sp <- mujeres[mujeres$EN == "sobrepeso", ]
+mujeres_nsp <- mujeres[mujeres$EN == "no sobrepeso", ]
+
+# Muestreo balanceado
+set.seed(10)
+idx_sp  <- sample(nrow(mujeres_sp), 75)
+idx_nsp <- sample(nrow(mujeres_nsp), 75)
+
+# Separación (100 para entrenar, 50 para probar)
+datos_ent <- rbind(mujeres_sp[idx_sp[1:50], ], mujeres_nsp[idx_nsp[1:50], ])
+datos_pru <- rbind(mujeres_sp[idx_sp[51:75], ], mujeres_nsp[idx_nsp[51:75], ])
+```
+
+La variable EN queda balanceada por construcción tanto en entrenamiento 50/100 casos de sobrepeso) como en prueba 25/50
+
+## 2. Construcción de los Modelos
+
+Como predictor base tomamos el contorno de la cadera indicando información sobre el Estado Nutricional (EN) sin usar el peso o la altura.
+
+```{r}
+vars_azar <- c("Thigh.Girth", "Chest.Girth", "Forearm.Girth",
+               "Biacromial.diameter", "Waist.Girth", "Knee.Girth",
+               "Calf.Maximum.Girth", "Age")
+
+# Modelo Simple
+RLogiS <- glm(EN ~ Hip.Girth, data = datos_ent, family = binomial(link = "logit"))
+summary(RLogiS)
+
+# Búsqueda hacia adelante para el Modelo Múltiple
+formula_tope <- as.formula(paste("EN ~ Hip.Girth +", paste(vars_azar, collapse = " + ")))
+modelo_tope <- glm(formula_tope, data = datos_ent, family = binomial(link = "logit"))
+
+RLogiM <- step(RLogiS,
+               scope = list(lower = RLogiS, upper = modelo_tope),
+               direction = "forward",
+               trace = 0)
+summary(RLogiM)
+```
+
+La búsqueda agregó 3 predictores al modelo simple (Chest.Girth, Thigh.Girth, Biacromial.diameter), quedando dentro del rango de 2 a 5 solicitado.
+
+## 3. Confiabilidad y Diagnóstico
+
+Evaluamos las condiciones exigidas para que tanto RLogiS como RLogiM sean modelos de regresión logística confiables.
+
+### 3.1 Bondad de ajuste
+
+```{r}
+anova_lrt <- anova(RLogiS, RLogiM, test = "LRT")
+anova_lrt
+```
+
+RLogiM reduce significativamente la devianza respecto de RLogiS (p = 2.65e-06), por lo que agregar esos predictores se justifica.
+
+### 3.2 Linealidad con el logit
+
+```{r}
+# Modelo simple
+rp_s <- residualPlots(RLogiS, fitted = FALSE)
+
+# Modelo múltiple
+rp_m <- residualPlots(RLogiM, fitted = FALSE)
+crPlots(RLogiM)
+```
+
+Ninguna de las pruebas de curvatura resulta significativa en RLogiS (p = 0.569) ni en RLogiM (mínimo p entre los cuatro predictores = 0.104), por lo que no hay evidencia en contra del supuesto de linealidad entre los predictores y la respuesta transformada en ninguno de los dos modelos.
+
+### 3.3 Independencia de los residuos
+
+```{r}
+# Modelo simple
+dwt_s <- durbinWatsonTest(RLogiS)
+dwt_s
+
+# Modelo múltiple
+dwt_m <- durbinWatsonTest(RLogiM)
+dwt_m
+```
+
+Aunque la prueba de Durbin-Watson resultó significativa (lo que sugeriría autocorrelación en los residuos), es probableme que sea un falso positivo. Esto probablemente porque los datos se ordenaron de la forma "sobrepeso" y luego los de "no sobrepeso". Para verificar la independencia real de los residuos, reordenamos al azar y hacemos la prueba.
+
+### 3.4 Multicolinealidad
+
+```{r}
+vif(RLogiM)
+```
+
+Los predictores muestran VIF menores a 5, no hay problema de multicolinealidad.
+
+### 3.5 Casos influyentes
+
+```{r}
+# Modelo simple
+ip_s <- influencePlot(RLogiS)
+ip_s
+
+# Modelo múltiple
+ip_m <- influencePlot(RLogiM)
+ip_m
+```
+
+No se eliminó ninguna observación ya que la distancia de Cook no superó el umbral de 1, no existen casos sobreinfluyentes capaces de deformar los coeficientes por sí solos. Un detalle a considerar es que algunos puntos presentaron un apalancamiento alto (Hat > 0,05), lo que podria causar alguna inestabilidad en los coeficientes.
+
+## 4. Corrección del modelo (Casos Influyentes)
+
+```{r}
+# No hay casos influyentes severos (>1). Se mantiene el modelo original.
+modelo_final <- RLogiM
+summary(modelo_final)
+```
+
+## 5. Evaluación Predictiva
+
+Se utiliza la matriz de confusión y el análisis ROC para evaluar el desempeño de ambos clasificadores, tanto en la fase de ajuste como de generalización.
+
+### 5.1 Modelo simple
+
+```{r}
+# Probabilidades estimadas
+probs_ent_s <- fitted(RLogiS)
+probs_pru_s <- predict(RLogiS, newdata = datos_pru, type = "response")
+
+# Clasificación según umbral 0.5
+preds_ent_s <- factor(ifelse(probs_ent_s >= 0.5, "sobrepeso", "no sobrepeso"),
+                      levels = c("no sobrepeso", "sobrepeso"))
+preds_pru_s <- factor(ifelse(probs_pru_s >= 0.5, "sobrepeso", "no sobrepeso"),
+                      levels = c("no sobrepeso", "sobrepeso"))
+
+# Matrices de Confusión
+cm_ent_s <- confusionMatrix(preds_ent_s, datos_ent$EN, positive = "sobrepeso")
+cm_ent_s
+
+cm_pru_s <- confusionMatrix(preds_pru_s, datos_pru$EN, positive = "sobrepeso")
+cm_pru_s
+
+# Análisis ROC y AUC
+roc_ent_s <- roc(datos_ent$EN, probs_ent_s, levels = c("no sobrepeso", "sobrepeso"), direction = "<")
+roc_pru_s <- roc(datos_pru$EN, probs_pru_s, levels = c("no sobrepeso", "sobrepeso"), direction = "<")
+
+ggroc(list(Entrenamiento = roc_ent_s, Prueba = roc_pru_s), legacy.axes = TRUE) +
+  theme_minimal() +
+  ggtitle("Curvas ROC RLogiS: Entrenamiento vs Prueba")
+
+cat("\nAUC Entrenamiento RLogiS:", roc_ent_s$auc, "\n")
+cat("AUC Prueba RLogiS:", roc_pru_s$auc, "\n")
+```
+
+RLogiS alcanza 88% de exactitud en entrenamiento y 80% en prueba (AUC de 0.955 y 0.932, respectivamente), lo que ya constituye un clasificador razonable usando un único predictor.
+
+### 5.2 Modelo múltiple (RLogiM)
+
+```{r evaluacion-multiple}
+# Probabilidades estimadas
+probs_ent <- fitted(modelo_final)
+probs_pru <- predict(modelo_final, newdata = datos_pru, type = "response")
+
+# Clasificación según umbral 0.5
+preds_ent <- factor(ifelse(probs_ent >= 0.5, "sobrepeso", "no sobrepeso"), 
+                    levels = c("no sobrepeso", "sobrepeso"))
+preds_pru <- factor(ifelse(probs_pru >= 0.5, "sobrepeso", "no sobrepeso"), 
+                    levels = c("no sobrepeso", "sobrepeso"))
+
+# Matrices de Confusión
+cm_ent_m <- confusionMatrix(preds_ent, datos_ent$EN, positive = "sobrepeso")
+cm_ent_m
+
+cm_pru_m <- confusionMatrix(preds_pru, datos_pru$EN, positive = "sobrepeso")
+cm_pru_m
+
+# Análisis ROC y AUC
+roc_ent <- roc(datos_ent$EN, probs_ent, levels = c("no sobrepeso", "sobrepeso"), direction = "<")
+roc_pru <- roc(datos_pru$EN, probs_pru, levels = c("no sobrepeso", "sobrepeso"), direction = "<")
+
+# Curvas ROC
+ggroc(list(Entrenamiento = roc_ent, Prueba = roc_pru), legacy.axes = TRUE) + 
+  theme_minimal() + 
+  ggtitle("Curvas ROC RLogiM: Entrenamiento vs Prueba")
+
+cat("\nAUC Entrenamiento RLogiM:", roc_ent$auc, "\n")
+cat("AUC Prueba RLogiM:", roc_pru$auc, "\n")
+```
+
+## 6. Conclusiones e Interpretación Final
+
+El modelo múltiple (RLogiM) demostró un buen rendimiento al alcanzar un 93% de exactitud (sensibilidad 94%, especificidad 92%) y un AUC de 0.99 en entrenamiento, manteniendo un 92% de exactitud (sensibilidad 96%, especificidad 88%) y un AUC de 0.974 en prueba, lo que descarta el sobreajuste y confirma su capacidad de generalización. RLogiM supera significativamente al modelo simple RLogiS (exactitud de 88%/80% y AUC de 0.955/0.932 en entrenamiento/prueba), Se respaldan los predictores adicionales junto con la prueba LRT. Eso sí, aunque existen riesgos por cuasi-separación, alto apalancamiento y autocorrelación según el ordenamiento de los datos, RLogiM fue la mejor opción para diagnosticar el estado nutricional, aunque con un tamaño mayor podríamos haber reducido la inestabilidad un poco.

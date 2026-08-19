@@ -1,0 +1,302 @@
+---
+title: "EP09-respuesta-equipo-6"
+author: "Equipo 6"
+date: "2026-07-29"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo      = TRUE,
+  warning   = FALSE,
+  message   = FALSE,
+  fig.align = "center",
+  fig.width = 7,
+  fig.height = 4
+)
+
+paquetes <- c("boot", "car", "caret", "ggfortify", "ggplot2", 
+  "ggpubr", "grid", "gridExtra", "gmodels", "ez", "emmeans", "infer", 
+  "kableExtra", "Hmisc", "knitr", "leaps", "lmtest", "lsmeans", 
+  "multcomp", "nlme", "plyr", "pROC", "purrr", "pwr", "readr", 
+  "scatterplot3d", "psych", "TeachingDemos", "tibble", "tidyr","nortest", "dplyr", "MASS")
+
+install_if_missing <- function(p) {
+  if (!require(p, character.only = TRUE)) {
+    install.packages(p)
+    library(p, character.only = TRUE)
+  }
+}
+invisible(sapply(paquetes, install_if_missing))
+library(conflicted)
+conflicts_prefer(dplyr::select)
+conflicts_prefer(dplyr::filter)
+conflicts_prefer(dplyr::mutate)
+conflicts_prefer(purrr::pmap)
+conflicts_prefer(dplyr::summarise)
+conflicts_prefer(dplyr::count)
+```
+
+---
+
+## Preparación de los datos
+
+```{r}
+
+datos = read.csv2("EP09 Datos.csv")
+head(datos)
+
+# Parte 1, 2 y 3 - creación IMC y EN
+datos_imc = datos |> mutate(IMC = Weight / ((Height / 100)**2),
+                            EN = if_else(IMC >= 23.2, 1L, 0L))
+head(datos_imc)
+
+```
+
+## Preparación de la muestra
+
+```{r}
+
+# Parte 0 - semilla
+set.seed(2706)
+
+# Parte 1 - selección muestra (150 mujeres)
+datos_mujer = datos_imc |> filter(Gender==0)
+
+# Garantizamos mitad de mujeres con EN = 1 y EN = 0 primero agrupando por EN, seleccionando las muestras, y desagrupando
+
+muestra = datos_mujer |> group_by(EN) |> slice_sample(n=75) |> 
+  mutate(conjunto = sample(c(rep("modelo",50), rep("evaluacion", 25)
+                             ))
+         ) |> ungroup()
+
+datos_modelo = muestra |> filter(conjunto == "modelo") |> 
+  select(-conjunto)
+
+datos_evaluacion = muestra |> filter(conjunto == "evaluacion") |> 
+  select(-conjunto)
+
+# Aseguramos que ambos conjuntos de datos cuenten con la restricción solicitada de 50/50 y 25/25 datos correspondan a EN = 1 y EN = 0
+muestra |> count(conjunto, EN)
+
+```
+
+Parte 2  - Variables predictoras seleccionadas aleatoriamente
+Son: 1. Biiliac.diameter 
+     2. Chest.depth 
+     3. Biacromial.diameter 
+     4. Forearm.Girth 
+     5. Shoulder.Girth 
+     6. Knee.Girth
+     7. Calf.Maximum.Girth
+     8. Navel.Girth
+     
+```{r}
+variables_predictoras <- c(
+  "Biiliac.diameter",
+  "Chest.depth",
+  "Biacromial.diameter",
+  "Forearm.Girth",
+  "Shoulder.Girth",
+  "Knee.Girth",
+  "Calf.Maximum.Girth",
+  "Navel.Girth"
+)
+
+all(variables_predictoras %in% names(datos_modelo))
+```
+
+## Modelo de regresión logística
+
+Parte 3 - Selección de variable 
+Se seleccionó la variable "Waist.Girth" (circunferencia a la altura de la cintura) como predictor inicial del estado nutricional EN. Hay estudios que han encontrado una asociación de la circunferencia de la cintura con la acumulación de tejido graso y con la categoría de sobrepeso que entrega el IMC. Un estudio particular (Tutunchi et al., 2020) concluyó después de observar en su población de estudio que la circunferencia de la cintura es un fuerte indicador de sobrepeso, y recomienda un punto de corte de 84cm para mujeres con una sensibilidad del 92% y una especificidad del 94.1% para determinar obesidad y sobrepeso en su muestra (Hombres y mujeres adultos iraníes). Es importante señalar que este punto de corte de 84 cm fue obtenido usando IMC >= 25 como medida de sobrepeso, a diferencia de nuestro 23.2.
+
+De acuerdo con este estudio, esperamos que a medida que aumente la circunferencia medida a la altura de la cintura, mayor es la probabilidad de que pertenezca a la clase EN = 1.
+
+```{r}
+# Parte 4 - modelo de regresión logística simple
+modelo_logistico_simple <- glm(
+  EN ~ Waist.Girth,
+  data = datos_modelo,
+  family = binomial(link = "logit")
+)
+
+# Resumen estadístico del modelo
+summary(modelo_logistico_simple)
+
+# Coeficientes estimados
+coef(modelo_logistico_simple)
+
+# Razones de probabilidad
+exp(coef(modelo_logistico_simple))
+
+# Intervalos de confianza del 95 % para las razones de probabilidad
+exp(confint(modelo_logistico_simple))
+
+```
+
+De estos datos podemos ver que Waist.Girth se asoció positiva y significativamente con el estado nutricional EN, como pensábamos. Waist.Girth presenta un coeficiente estimado de 0.484, que nos da una razón de probabilidad de 1.62 aproximadamente. Esto significa que por cada centímetro adicional de circunferencia de cintura, las probabilidades de presentar sobrepeso se multiplican por 1.62 Además, la disminución de la devianza respecto del modelo nulo de 138.62 a 64.3 nos indica que incorporar Waist.Girth mejora el ajuste del modelo
+
+
+
+
+Parte 5 - Para cumplir con este paso y buscar entre dos y cinco predictores de las variables seleccionadas al azar, utilizaremos un método de selección de variables automático paso a paso. La herramienta estandar que se utiliza es la funcion step().
+
+Para realizar la búsqueda, primero definiremos un modelo completo que incluya nuestro predictor inicial (Waist.Girth) más las 8 variables predictoras que seleccionamos al azar.El algoritmo evaluará distintas combinaciones hasta encontrar el modelo más óptimo.
+
+```{r}
+# Definicion del modelo completo como limite superior para la busqueda
+modelo_completo <- glm(
+  EN ~ Waist.Girth + Biiliac.diameter + Chest.depth + Biacromial.diameter + 
+       Forearm.Girth + Shoulder.Girth + Knee.Girth + Calf.Maximum.Girth + Navel.Girth,
+  data = datos_modelo,
+  family = binomial(link = "logit")
+)
+
+# Parte 5 - Busqueda de predictores (stepwise)
+modelo_extendido <- step(
+  modelo_logistico_simple,
+  scope = list(lower = modelo_logistico_simple, upper = modelo_completo),
+  direction = "both",
+  trace = 0
+)
+
+# Resumen estadistico del nuevo modelo obtenido
+summary(modelo_extendido)
+
+# Se muestra los coeficientes seleccionados por el modelo
+coef(modelo_extendido)
+```
+
+Al observar los resultados, el algoritmo seleccionó un modelo final que incluye nuestro predictor original Waist.Girth, añadiendo tres variables adicionales de nuestra selección aleatoria: Knee.Girth, Biacromial.diameter y Chest.depth.
+Los coeficientes nos muestra que Waist.Girth y Knee.Girth son predictores positivamente asociados y alatamente significativos.Biacromial.diameter presenta una asociacion negativa y significativa. Con Chest.depth no respeta la significancia , pero el criterio AIC decidio incluirlo, ya que tiene un aporte en el ajuste global.Por último se puede notar que la desvianza residual bajo a 40.831 , lo que dice que este conjunto de variables logra un nivel de ajuste superior.
+
+## Evalaucion del Modelo
+Parte 6 - Para asegurar que nuestro modelo extendido es confiable, debemos verificar que cumple con ciertas condiciones esenciales de la regresión logística, las cuales son:
+
+1. Ausencia de multicolinealidad: Verificamos que las variables predictoras no estén aportando información redundante al modelo. Para esto usaremos el Factor de Inflación de la Varianza (VIF). En el cual los valores de VIF menores a 5 indican que no hay problemas graves de colinealidad.
+
+2. Independencia de los residuos: Utilizaremos la prueba de Durbin-Watson para comprobar que los residuos del modelo sean independientes entre sí.
+
+3. Casos sobreinfluyentes: Emplearemos la Distancia de Cook para identificar si existen observaciones atípicas que estén dominando o alterando excesivamente los coeficientes del modelo. Si un caso presenta una distancia de Cook mayor a 1, se considera problemático.
+
+
+```{r}
+# Evaluacion de Multicolinealidad (VIF)
+print(vif(modelo_extendido))
+
+# Independencia de los residuos (Prueba de Durbin-Watson)
+print(durbinWatsonTest(modelo_extendido))
+
+# Deteccion y manejo de casos sobreinfluyentes (Distancia de Cook)
+distancias_cook <- cooks.distance(modelo_extendido)
+umbral_cook <- 1 
+
+casos_influyentes <- which(distancias_cook > umbral_cook) 
+
+if(length(casos_influyentes) > 0) {
+  cat("\nSe detectaron casos influyentes. Removiendo los índices:", names(casos_influyentes), "\n")
+  
+  # Arreglar el modelo eliminando casos problemáticos del conjunto original
+  datos_modelo_limpio <- datos_modelo[-casos_influyentes, ]
+  
+  # reajuste del modelo sin esas observaciones
+  modelo_final <- update(modelo_extendido, data = datos_modelo_limpio)
+  
+  cat("\nResumen del modelo FINAL ajustado (sin casos sobreinfluyentes):\n")
+  print(summary(modelo_final))
+} else {
+  cat("\nNo se detectaron casos sobreinfluyentes (Distancia de Cook > 1). El modelo es robusto.\n")
+  
+  # Si no hay problemas, nuestro modelo final es el modelo extendido
+  modelo_final <- modelo_extendido
+}
+```
+Con estos resultados se pueden saber la confiabilidad del modelo extendido:
+
+- Multicolinealidad (VIF): Todos los valores del Factor de Inflación de la Varianza son cercanos a 1 y se encuentran muy por debajo del umbral crítico de 5 (el valor más alto es 1.58 para Biacromial.diameter). Esto nos confirma que no existe multicolinealidad problemática en el modelo. Cada variable predictora está aportando información única al modelo.
+
+- Independencia de los residuos (Durbin-Watson): La prueba de Durbin-Watson arroja un estadístico de 1.47 . Tambien la prueba arroja un valor p de 0.008, lo que sugiere una leve relación entre los datos (autocorrelación). Sin embargo, como estamos midiendo a personas distintas y no un evento a través del tiempo, esto se debe muy probablemente a cómo vienen ordenadas las filas en el archivo original. Por lo tanto, aunque es un detalle técnico que debemos mencionar, no invalida la utilidad de nuestro modelo.
+
+- Casos sobreinfluyentes: Ninguna observación superó el umbral de 1 en la Distancia de Cook. Esto garantiza que el modelo es robusto y que los coeficientes no están siendo dominados por valores atípicos extremos.
+
+En conclusión, el modelo presenta un muy buen comportamiento respecto a la multicolinealidad y la influencia de casos extremos, por lo cual es un modelo y una herramienta predictiva confiable, a pesar de la leve autocorrelación detectada. Por lo tanto, conservaremos este modelo como nuestro modelo_final para la fase de evaluación.
+
+## Evaluación del poder predictivo
+Parte 7 - Usando código estándar (Entenderemos esto como los paquetes base (como por ejemplo base y stats) y el paquete car.), evaluar el poder predictivo de los modelos con los datos de las 50 personas que no se incluyeron en su construcción en términos de sensibilidad y especificidad.
+
+```{r}
+# MODELO SIMPLE
+
+# Entrenamiento
+pred_s_ent <- ifelse(fitted(modelo_logistico_simple) >= 0.5, 1, 0)
+tabla_s_ent <- table(pred_s_ent, datos_modelo$EN)
+# Calculamos métricas manualmente
+VP_s_ent <- tabla_s_ent[2,2]
+VN_s_ent <- tabla_s_ent[1,1]
+FP_s_ent <- tabla_s_ent[2,1]
+FN_s_ent <- tabla_s_ent[1,2]
+sens_s_ent <- VP_s_ent / (VP_s_ent + FN_s_ent)
+espec_s_ent <- VN_s_ent / (VN_s_ent + FP_s_ent)
+exact_s_ent <- (VP_s_ent + VN_s_ent) / sum(tabla_s_ent)
+
+# Prueba
+pred_s_pru <- ifelse(predict(modelo_logistico_simple, datos_evaluacion, type="response") >= 0.5, 1, 0)
+tabla_s_pru <- table(pred_s_pru, datos_evaluacion$EN)
+VP_s_pru <- tabla_s_pru[2,2]
+VN_s_pru <- tabla_s_pru[1,1]
+FP_s_pru <- tabla_s_pru[2,1]
+FN_s_pru <- tabla_s_pru[1,2]
+sens_s_pru <- VP_s_pru / (VP_s_pru + FN_s_pru)
+espec_s_pru <- VN_s_pru / (VN_s_pru + FP_s_pru)
+exact_s_pru <- (VP_s_pru + VN_s_pru) / sum(tabla_s_pru)
+
+# MODELO EXTENDIDO
+
+# Entrenamiento
+pred_e_ent <- ifelse(fitted(modelo_final) >= 0.5, 1, 0)
+tabla_e_ent <- table(pred_e_ent, datos_modelo$EN)
+VP_e_ent <- tabla_e_ent[2,2]
+VN_e_ent <- tabla_e_ent[1,1]
+FP_e_ent <- tabla_e_ent[2,1]
+FN_e_ent <- tabla_e_ent[1,2]
+sens_e_ent <- VP_e_ent / (VP_e_ent + FN_e_ent)
+espec_e_ent <- VN_e_ent / (VN_e_ent + FP_e_ent)
+exact_e_ent <- (VP_e_ent + VN_e_ent) / sum(tabla_e_ent)
+
+# Prueba
+pred_e_pru <- ifelse(predict(modelo_final, datos_evaluacion, type="response") >= 0.5, 1, 0)
+tabla_e_pru <- table(pred_e_pru, datos_evaluacion$EN)
+VP_e_pru <- tabla_e_pru[2,2]
+VN_e_pru <- tabla_e_pru[1,1]
+FP_e_pru <- tabla_e_pru[2,1]
+FN_e_pru <- tabla_e_pru[1,2]
+sens_e_pru <- VP_e_pru / (VP_e_pru + FN_e_pru)
+espec_e_pru <- VN_e_pru / (VN_e_pru + FP_e_pru)
+exact_e_pru <- (VP_e_pru + VN_e_pru) / sum(tabla_e_pru)
+
+# Outputs
+tabla_s_ent
+c(Sensibilidad = sens_s_ent, Especificidad = espec_s_ent, Exactitud = exact_s_ent)
+
+tabla_s_pru
+c(Sensibilidad = sens_s_pru, Especificidad = espec_s_pru, Exactitud = exact_s_pru)
+
+tabla_e_ent
+c(Sensibilidad = sens_e_ent, Especificidad = espec_e_ent, Exactitud = exact_e_ent)
+
+tabla_e_pru
+c(Sensibilidad = sens_e_pru, Especificidad = espec_e_pru, Exactitud = exact_e_pru)
+```
+El modelo simple, basado solo en la circunferencia de cintura, clasificó correctamente el 86% de los casos en entrenamiento (sensibilidad 84%, especificidad 88%) y mantuvo un rendimiento incluso ligeramente superior en prueba (exactitud 88%, sensibilidad 84%, especificidad 92%), lo que indica estabilidad y ausencia de sobreajuste. En cambio, el modelo extendido mostró un mejor ajuste en entrenamiento (90% en las tres métricas), pero su desempeño cayó en prueba (exactitud 84%, sensibilidad 80%, especificidad 88%), evidenciando sobreajuste y menor generalización. Por lo tanto, concluimos que el modelo simple es más confiable y práctico: mantiene un buen poder predictivo en datos nuevos, es más sencillo de implementar (solo requiere medir la cintura) y no presenta problemas de sobreajuste, por lo que lo recomendamos como la mejor opción para clasificar el estado nutricional en esta población.
+
+## Referencias
+
+Tutunchi, H., Ebrahimi-Mameghani, M., Ostadrahimi, A., & Asghari-Jafarabadi, M. (2020). What are the optimal cut-off points of anthropometric indices for prediction of overweight and obesity? Predictive validity of waist circumference, waist-to-hip and waist-to-height ratios. Health Promotion Perspectives, 10(2), 142–147. https://doi.org/10.34172/hpp.2020.23

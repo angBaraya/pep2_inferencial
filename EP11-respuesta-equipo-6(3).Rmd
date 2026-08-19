@@ -1,0 +1,654 @@
+---
+title: "EP11-respuesta-equipo-6"
+author: "Equipo 6"
+date: "2026-08-10"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  fig.align = "center",
+  fig.width = 7,
+  fig.height = 4
+)
+
+paquetes <- c(
+  "car",
+  "caret",
+  "conflicted",
+  "dplyr",
+  "ggplot2",
+  "knitr",
+  "leaps",
+  "lmtest",
+  "pROC"
+)
+
+install_if_missing <- function(p) {
+  if (!require(p, character.only = TRUE)) {
+    install.packages(p)
+    library(p, character.only = TRUE)
+  }
+}
+
+invisible(sapply(paquetes, install_if_missing))
+
+library(conflicted)
+
+conflicts_prefer(dplyr::select)
+conflicts_prefer(dplyr::filter)
+conflicts_prefer(dplyr::mutate)
+conflicts_prefer(dplyr::summarise)
+conflicts_prefer(dplyr::count)
+conflicts_prefer(dplyr::arrange)
+```
+
+---
+
+## 1. Preparación de los datos
+
+```{r}
+
+# Importar los datos
+datos <- read.csv2("EP09 Datos.csv")
+
+head(datos)
+
+# Crear las variables IMC y EN, y convertir Gender en factor
+datos_imc <- datos |>
+  mutate(
+    Gender = factor(Gender),
+    IMC = Weight / ((Height / 100)^2),
+    EN = if_else(IMC >= 23.2, 1L, 0L)
+  )
+
+# Semilla: primeros cinco dígitos del RUN del integrante de mayor edad
+set.seed(21247)
+
+```
+
+## 2. Preparación de la muestra
+
+```{r}
+
+# Seleccionar 50 personas de cada estado nutricional
+muestra <- datos_imc |>
+  group_by(EN) |>
+  slice_sample(n = 50) |>
+  ungroup()
+
+# Verificar la cantidad de personas de cada categoría
+balance_muestra <- muestra |>
+  count(EN, name = "n")
+
+print(balance_muestra)
+
+# Comprobar que la muestra tenga 100 personas:
+# 50 con EN = 0 y 50 con EN = 1
+stopifnot(
+  nrow(muestra) == 100,
+  nrow(balance_muestra) == 2,
+  setequal(balance_muestra$EN, c(0L, 1L)),
+  all(balance_muestra$n == 50)
+)
+
+# Datos para la búsqueda exhaustiva del modelo de Peso
+df_busqueda <- muestra |>
+  select(-IMC, -EN)
+
+```
+     
+## 3. Búsqueda exhaustiva para seleccionar predictores
+
+Para seleccionar los predictores del Peso se realizará una búsqueda exhaustiva mediante la función `regsubsets()` del paquete `leaps`. Se evaluarán modelos que incluyan entre dos y ocho predictores.
+Como criterio principal se utilizará el BIC. Este criterio considera tanto el ajuste como la cantidad de predictores utilizados, por lo que se seleccionará el modelo que presente el menor BIC.
+
+
+```{r}
+# Realizar la búsqueda exhaustiva
+busqueda_peso <- regsubsets(
+  Weight ~ ., # Predice Weight usando todas las demás
+  data = df_busqueda,
+  nvmax = 8,
+  method = "exhaustive"
+)
+
+# Obtener los resultados
+resumen_peso <- summary(busqueda_peso)
+
+# Tamaños permitidos por el enunciado
+tamanios_peso <- 2:8
+
+# Mostrar las métricas solamente para modelos de 2 a 8 predictores
+resultados_peso <- data.frame(
+  Predictores = tamanios_peso,
+  R2_ajustado = resumen_peso$adjr2[tamanios_peso],
+  BIC = resumen_peso$bic[tamanios_peso],
+  Cp = resumen_peso$cp[tamanios_peso]
+)
+
+knitr::kable(resultados_peso, digits = 3)
+```
+
+Además del BIC, se presentan el R^2 ajustado y el C_p de Mallows como criterios complementarios. Un buen modelo debería presentar un BIC bajo, un R^2 ajustado alto y un valor de C_p pequeño y cercano a la cantidad de parámetros estimados.
+
+```{r}
+# Seleccionar el número de predictores con menor BIC
+n_optimo <- tamanios_peso[
+  which.min(resumen_peso$bic[tamanios_peso])
+]
+
+n_optimo
+
+# Mostrar los predictores seleccionados
+coef(busqueda_peso, id = n_optimo)
+```
+
+```{r}
+# Representar la selección basada en BIC
+plot(busqueda_peso, scale = "bic")
+```
+
+El modelo con ocho predictores presentó el menor BIC, con un valor de -344.040. Además, obtuvo el mayor R² ajustado, igual a 0.977, y el menor Cp de Mallows, con un valor de 7.433. Por lo tanto, los tres criterios examinados respaldan la selección del modelo con ocho predictores.
+
+El R² ajustado indica que el modelo explica aproximadamente un 97.7% de la variabilidad observada en el Peso, considerando la cantidad de variables incluidas. Por otra parte, el Cp obtenido es relativamente cercano a la cantidad de parámetros estimados por el modelo.
+
+Los predictores seleccionados fueron el diámetro de las rodillas, la circunferencia del pecho, la circunferencia de la cintura, la circunferencia de la cadera, la circunferencia del muslo, la circunferencia del antebrazo, la circunferencia máxima de la pantorrilla y la estatura.
+
+### Construcción del modelo de regresión lineal
+
+Se construyó un modelo de regresión lineal múltiple con los ocho predictores seleccionados y se evaluó mediante bootstrap con 500 remuestras.
+
+```{r}
+# Configurar la evaluación mediante bootstrap
+control_boot <- trainControl(
+  method = "boot",
+  number = 500
+)
+
+# Construir y evaluar el modelo
+modelo_peso <- train(
+  Weight ~ Knees.diameter + Chest.Girth + Waist.Girth +
+    Hip.Girth + Thigh.Girth + Forearm.Girth +
+    Calf.Maximum.Girth + Height,
+  data = df_busqueda,
+  method = "lm",
+  trControl = control_boot
+)
+
+modelo_peso
+```
+
+La función train() ajusta el modelo lineal y utiliza las remuestras bootstrap para estimar su rendimiento al predecir observaciones que no fueron utilizadas en cada ajuste.
+
+```{r}
+# Mostrar las métricas obtenidas mediante bootstrap
+modelo_peso$results
+```
+
+```{r}
+# Mostrar el resumen del modelo ajustado con la muestra completa
+summary(modelo_peso$finalModel)
+```
+### Evaluación mediante bootstrap
+
+La evaluación mediante 500 remuestras bootstrap produjo un RMSE de 2.183 kg. Esto significa que el error cuadrático típico de las predicciones del modelo es de aproximadamente 2.18 kg.
+
+El MAE fue de 1.633 kg, por lo que la diferencia absoluta entre el Peso observado y el predicho es, en promedio, cercana a 1.63 kg. Como el RMSE es mayor que el MAE, algunos errores relativamente grandes afectan con mayor intensidad al RMSE.
+
+El R² obtenido mediante bootstrap fue de 0.974. Por lo tanto, el modelo mantiene una asociación muy alta entre los valores observados y predichos en las observaciones evaluadas durante el remuestreo.
+
+Las desviaciones estándar del RMSE, R² y MAE fueron 0.368, 0.006 y 0.205, respectivamente. La baja variabilidad de estas métricas indica que el rendimiento del modelo fue estable entre las diferentes remuestras bootstrap.
+
+El modelo ajustado con la muestra completa obtuvo un R² de 0.979 y un R² ajustado de 0.977. Además, la prueba F global fue significativa, \(F(8,91)=525.8,\ p<0.001\), lo que indica que el conjunto de predictores contribuye significativamente a explicar el Peso.
+
+El R² ajustado de la muestra completa y el R² obtenido mediante bootstrap son muy similares. Esta diferencia reducida sugiere que el desempeño aparente del modelo no disminuye considerablemente al evaluarlo mediante remuestreo. Sin embargo, antes de pronunciarse sobre su confiabilidad también se deben revisar los supuestos del modelo lineal y la presencia de observaciones influyentes.
+
+### Revisión de las condiciones
+
+Para determinar si el modelo lineal obtenido es confiable, se revisará la linealidad, normalidad de los residuos, homocedasticidad, multicolinealidad y presencia de observaciones influyentes.
+
+```{r}
+# Mostrar los gráficos diagnósticos del modelo lineal
+par(mfrow = c(2, 2))
+plot(modelo_peso$finalModel)
+par(mfrow = c(1, 1))
+
+# Evaluar la normalidad de los residuos
+shapiro.test(residuals(modelo_peso$finalModel))
+
+# Evaluar la homogeneidad de la varianza
+bptest(modelo_peso$finalModel)
+
+# Calcular los factores de inflación de la varianza
+vif(modelo_peso$finalModel)
+
+# Calcular la distancia de Cook
+cook_peso <- cooks.distance(modelo_peso$finalModel)
+
+# Mostrar las observaciones con distancia de Cook mayor que 4/n
+which(cook_peso > 4 / nrow(df_busqueda))
+
+# Graficar las distancias de Cook
+plot(
+  cook_peso,
+  type = "h",
+  main = "Distancia de Cook",
+  xlab = "Observación",
+  ylab = "Distancia de Cook"
+)
+
+abline(
+  h = 4 / nrow(df_busqueda),
+  col = "red",
+  lty = 2
+)
+```
+
+En general, los gráficos indican que el modelo cumple razonablemente con las condiciones de linealidad y varianza constante, lo que también es respaldado por la prueba de Breusch-Pagan (p=0.1045). Sin embargo, la prueba de Shapiro-Wilk (p=0.0004) y el gráfico Q-Q muestran que los residuos no siguen una distribución normal. Además, algunas variables presentan multicolinealidad moderada y se identificaron seis observaciones potencialmente influyentes, destacando especialmente la observación 69. Por lo tanto, aunque el modelo presenta un buen ajuste, estas limitaciones deben considerarse al evaluar su confiabilidad.
+
+## 4. Recursive Feature Elimination para construir un modelo de regresión lineal múltiple para IMC
+
+```{r}
+
+# 1. Preparar los datos para predecir IMC ------------------------------
+
+# Se excluyen Weight y Height porque se utilizaron para calcular el IMC.
+# También se elimina EN porque deriva directamente del IMC.
+df_busqueda_imc <- muestra |>
+  select(-Weight, -Height, -EN)
+
+# Tamaño de subconjuntos exigidos por el enunciado.
+tamanios_imc <- 10:20
+
+
+# 2. Configurar las funciones del RFE
+# -----------------------------
+
+# Usamos lmFuncs, por defecto selecciona el subconjunto que maximiza
+# la métrica Rsquared, que es lo que pide el ejercicio
+control_rfe <- rfeControl(
+  functions = lmFuncs,
+  method = "repeatedcv",
+  number = 5,
+  repeats = 5,
+  returnResamp = "all",
+  verbose = FALSE
+  )
+
+
+# 3. Ejecutar RFE
+# ------------------------------
+
+# mantenemos la semilla
+set.seed(21247)
+modelo_rfe <- rfe(
+  form = IMC ~ .,
+  data = df_busqueda_imc,
+  sizes = tamanios_imc,
+  metric = "Rsquared",
+  maximize = TRUE,
+  rfeControl = control_rfe
+)
+
+
+# 4. Extraer los resultados de los tamaños permitidos
+# ------------------------------
+
+resultados_rfe_imc <- modelo_rfe$results |>
+  filter(Variables %in% tamanios_imc) |>
+  arrange(Variables)
+
+tabla_resultados_imc <- resultados_rfe_imc |>
+  transmute(
+    n_predictores = Variables,
+    RMSE = round(RMSE, 4),
+    R2 = round(Rsquared, 4),
+    MAE = round(MAE, 4),
+    DE_RMSE = round(RMSESD, 4),
+    DE_R2 = round(RsquaredSD, 4),
+    DE_MAE = round(MAESD, 4)
+  )
+
+cat("\n--- Rendimiento según el número de predictores ---\n")
+print(tabla_resultados_imc)
+
+
+# 5. Identificar el modelo óptimo --------------------------------------
+
+# predictors() devuelve las variables del modelo final seleccionado
+predictores_imc <- predictors(modelo_rfe)
+tamanio_optimo_imc <- length(predictores_imc)
+
+# Comprobar que el tamaño elegido esté dentro del intervalo solicitado
+stopifnot(tamanio_optimo_imc %in% tamanios_imc)
+
+rendimiento_optimo_imc <- resultados_rfe_imc |>
+  filter(Variables == tamanio_optimo_imc)
+
+stopifnot(nrow(rendimiento_optimo_imc) == 1)
+
+cat(
+  "\nNúmero de predictores seleccionado por mayor R²:",
+  tamanio_optimo_imc,
+  "\n"
+)
+
+cat("\nPredictores seleccionados para el modelo de IMC:\n")
+print(predictores_imc)
+
+cat("\n--- Rendimiento del subconjunto con mayor R² ---\n")
+print(
+  rendimiento_optimo_imc |>
+    transmute(
+      n_predictores = Variables,
+      RMSE = round(RMSE, 4),
+      R2 = round(Rsquared, 4),
+      MAE = round(MAE, 4),
+      DE_RMSE = round(RMSESD, 4),
+      DE_R2 = round(RsquaredSD, 4),
+      DE_MAE = round(MAESD, 4)
+    )
+)
+
+
+# 6. Presentar el modelo lineal final ----------------------------------
+
+# El objeto fit contiene el modelo ajustado con toda la muestra,
+# utilizando únicamente los predictores seleccionados por el RFE.
+modelo_final_imc <- modelo_rfe$fit
+
+cat("\n--- Resumen del modelo lineal final para IMC ---\n")
+print(summary(modelo_final_imc))
+
+
+# 7. Calcular el desempeño aparente ------------------------------------
+
+predicciones_ajuste_imc <- predict(
+  modelo_rfe,
+  newdata = df_busqueda_imc
+)
+
+metricas_ajuste_imc <- postResample(
+  pred = predicciones_ajuste_imc,
+  obs = df_busqueda_imc$IMC
+)
+
+
+# 8. Comparar el ajuste con la validación cruzada ----------------------
+
+comparacion_metricas_imc <- data.frame(
+  Evaluacion = c(
+    "Muestra completa (aparente)",
+    "Validación cruzada repetida 5x5"
+  ),
+  RMSE = c(
+    unname(metricas_ajuste_imc["RMSE"]),
+    rendimiento_optimo_imc$RMSE
+  ),
+  R2 = c(
+    unname(metricas_ajuste_imc["Rsquared"]),
+    rendimiento_optimo_imc$Rsquared
+  ),
+  MAE = c(
+    unname(metricas_ajuste_imc["MAE"]),
+    rendimiento_optimo_imc$MAE
+  )
+)
+
+comparacion_metricas_imc[c("RMSE", "R2", "MAE")] <-
+  round(
+    comparacion_metricas_imc[c("RMSE", "R2", "MAE")],
+    4
+  )
+
+cat("\n--- Comparación del desempeño del modelo de IMC ---\n")
+print(comparacion_metricas_imc)
+
+
+# 9. Graficar el rendimiento del RFE ----------------------------------
+
+grafico_rfe_imc <- ggplot(
+  resultados_rfe_imc,
+  aes(x = Variables, y = Rsquared)
+) +
+  geom_line(
+    color = "lightskyblue1",
+    linewidth = 0.8
+  ) +
+  geom_point(
+    color = "lightskyblue3",
+    size = 2.5
+  ) +
+  geom_point(
+    data = rendimiento_optimo_imc,
+    color = "steelblue",
+    size = 4
+  ) +
+  scale_x_continuous(breaks = tamanios_imc) +
+  labs(
+    title = "Rendimiento del RFE para predecir IMC",
+    subtitle = paste(
+      "Subconjunto seleccionado:",
+      tamanio_optimo_imc,
+      "predictores"
+    ),
+    x = "Número de predictores",
+    y = "R² promedio de validación cruzada"
+  ) +
+  theme_minimal()
+
+print(grafico_rfe_imc)
+```
+El RFE seleccionó un modelo con 17 predictores, ya que obtuvo el mayor R² promedio en la validación cruzada, con un valor de 0.7941. Este modelo presentó un RMSE de 1.3785 kg/m² y un MAE de 1.1133 kg/m², por lo que sus predicciones se alejan del IMC observado en aproximadamente 1.11 kg/m² en promedio. Al evaluarlo con la muestra completa, el R² fue de 0.8788, mientras que mediante validación cruzada disminuyó a 0.7941. Esta diferencia de 0.0847 muestra cierto optimismo en el ajuste aparente y posibles señales de sobreajuste, lo que puede relacionarse con la utilización de 17 predictores en una muestra de 100 personas. Aun así, el modelo conserva un buen desempeño al evaluar datos no utilizados en cada ajuste.
+
+### Revisión de las condiciones del modelo de IMC
+
+Para evaluar la confiabilidad del modelo, se revisaron gráficamente sus residuos y se aplicaron pruebas de normalidad, homocedasticidad, multicolinealidad e influencia.
+
+```{r}
+# Mostrar los gráficos diagnósticos
+par(mfrow = c(2, 2))
+plot(modelo_final_imc)
+par(mfrow = c(1, 1))
+
+# Evaluar la normalidad de los residuos
+shapiro.test(residuals(modelo_final_imc))
+
+# Evaluar la homogeneidad de la varianza
+bptest(modelo_final_imc)
+
+# Evaluar la multicolinealidad
+vif(modelo_final_imc)
+
+# Identificar observaciones potencialmente influyentes
+cook_imc <- cooks.distance(modelo_final_imc)
+
+which(cook_imc > 4 / nrow(df_busqueda_imc))
+```
+
+Los residuos presentan una distribución aproximadamente normal, lo que es respaldado por la prueba de Shapiro-Wilk (p=0.8352). Sin embargo, la prueba de Breusch-Pagan (p=0.0309) indica que la varianza de los residuos no es constante, lo que también se observa en el gráfico Scale-Location. Además, el gráfico de residuos muestra cierta curvatura en los valores altos de IMC y varias variables presentan VIF superiores a 10, evidenciando multicolinealidad alta. También se identificaron ocho observaciones potencialmente influyentes. Por lo tanto, aunque el modelo mantiene un buen desempeño predictivo mediante validación cruzada, sus coeficientes individuales pueden ser inestables y sus errores podrían variar según el nivel de IMC. Estas limitaciones deben considerarse al evaluar su confiabilidad y al utilizarlo con nuevas observaciones.
+
+
+## 5. Recursive Feature Elimination para construir un modelo de regresión logística múltiple para EN
+
+```{r, warning=FALSE, message=FALSE}
+# 1. Preparar los datos para la regresión logística
+df_logit <- muestra |>
+  # Excluir Weight, Height e IMC (variables base)
+  select(-Weight, -Height, -IMC) |>
+  # Convertir EN a factor con niveles válidos (requisito para twoClassSummary)
+  mutate(EN = factor(EN, levels = c(0, 1), labels = c("No", "Si")))
+
+# Verificar la estructura y balance
+table(df_logit$EN)
+
+# 2. Configurar RFE para Regresión Logística y cálculo de ROC
+# Necesitamos que RFE sepa cómo calcular la curva ROC (AUC) en cada iteración
+funciones_rfe_logit <- caretFuncs
+funciones_rfe_logit$summary <- twoClassSummary 
+
+control_rfe_logit <- rfeControl(
+  functions = funciones_rfe_logit,
+  method = "LOOCV",          # Leave-one-out cross-validation
+  verbose = FALSE,
+  saveDetails = TRUE
+)
+
+# 3. Control de entrenamiento interno
+# Dado que RFE delega el ajuste interno a la función train(), 
+# debemos obligar al modelo a entregar probabilidades (classProbs)
+control_train_logit <- trainControl(
+  method = "none",                   # RFE ya maneja el remuestreo (LOOCV)
+  classProbs = TRUE,                 # Requisito para calcular AUC
+  summaryFunction = twoClassSummary  # Requisito para métricas binarias
+)
+
+# 4. Tamaños a evaluar (entre 2 y 6 predictores)
+tamanios_logit <- 2:6
+
+# 5. Ejecutar RFE
+set.seed(21247)
+modelo_rfe_logit <- rfe(
+  form = EN ~ .,
+  data = df_logit,
+  sizes = tamanios_logit,
+  metric = "ROC",            # Seleccionar el modelo que maximice el ROC (AUC)
+  maximize = TRUE,
+  rfeControl = control_rfe_logit,
+  # Argumentos específicos para que train() use Regresión Logística
+  method = "glm",
+  family = "binomial",
+  trControl = control_train_logit
+)
+
+# 6. Mostrar los resultados de RFE
+cat("\n--- Resultados de Recursive Feature Elimination (RFE) ---\n")
+print(modelo_rfe_logit)
+
+# 7. Predictores seleccionados en el modelo óptimo
+predictores_logit <- predictors(modelo_rfe_logit)
+cat("\nPredictores seleccionados (", length(predictores_logit), "):\n", sep = "")
+print(predictores_logit)
+
+# 8. Evaluación del modelo final ajustado
+modelo_final_logit <- modelo_rfe_logit$fit
+
+# Al ser un objeto train de caret, usamos type = "prob" y le pasamos los datos
+probabilidades_df <- predict(modelo_final_logit, newdata = df_logit, type = "prob")
+
+# Extraemos únicamente la columna correspondiente a la clase positiva ("Si")
+probabilidades <- probabilidades_df$Si
+
+roc_curva <- roc(
+  response = df_logit$EN, 
+  predictor = probabilidades, 
+  levels = c("No", "Si"), 
+  direction = "<"
+)
+auc_valor <- auc(roc_curva)
+
+cat("\n--- Evaluación del modelo final (Aparente) ---\n")
+cat("AUC en entrenamiento:", round(auc_valor, 3), "\n")
+
+# Graficar la curva ROC
+plot(
+  roc_curva, 
+  main = paste("Curva ROC - Modelo Logístico (AUC =", round(auc_valor, 3), ")"),
+  col = "#2C3E50", 
+  lwd = 2
+)
+
+# 9. Matriz de confusión con umbral por defecto (0.5)
+# caret permite predecir la clase directamente usando type = "raw"
+predicciones_clase <- predict(modelo_final_logit, newdata = df_logit, type = "raw")
+matriz_conf <- confusionMatrix(predicciones_clase, df_logit$EN, positive = "Si")
+
+cat("\n--- Matriz de Confusión ---\n")
+print(matriz_conf)
+```
+El RFE seleccionó un modelo de cuatro predictores compuesto por Chest.depth, Navel.Girth, Calf.Maximum.Girth y Elbows.diameter, ya que presentó el mayor AUC mediante LOOCV, con un valor de 0.894. Este resultado indica que el modelo posee una buena capacidad para distinguir entre personas con y sin sobrepeso. El modelo final obtuvo un AUC aparente de 0.933 y una exactitud de 83%, clasificando correctamente a 83 de las 100 personas. Su sensibilidad fue de 82%, por lo que identificó correctamente a 41 de las 50 personas con sobrepeso, mientras que su especificidad fue de 84%, identificando correctamente a 42 de las 50 personas sin sobrepeso. Además, el valor Kappa de 0.66 indica una concordancia considerable entre las clasificaciones observadas y predichas. Aunque estos resultados muestran un buen desempeño, el AUC de 0.933 y la matriz de confusión fueron calculados sobre la misma muestra utilizada para ajustar el modelo, por lo que representan un rendimiento aparente y podrían ser algo optimistas. Sin embargo, el AUC de 0.894 obtenido mediante LOOCV muestra que el modelo conserva una buena capacidad de clasificación al ser evaluado mediante remuestreo.
+
+### Revisión de las condiciones del modelo logístico
+
+```{r}
+# Reconstruir el modelo final con los predictores seleccionados
+modelo_logit <- glm(
+  EN ~ Chest.depth + Navel.Girth +
+    Calf.Maximum.Girth + Elbows.diameter,
+  data = df_logit,
+  family = binomial
+)
+
+summary(modelo_logit)
+
+# Comparamos con el modelo nulo
+# (modelo sin predictores)
+modelo_nulo_logit <- glm(
+  EN ~ 1,
+  data = df_logit,
+  family = binomial
+)
+
+# Comparar ambos modelos mediante LRT
+anova(
+  modelo_nulo_logit,
+  modelo_logit,
+  test = "LRT"
+)
+
+# Revisar la relación lineal de los predictores con el logit
+residualPlots(
+  modelo_logit,
+  fitted = FALSE
+)
+
+# Mostrar los gráficos de residuos parciales
+crPlots(
+  modelo_logit,
+  terms = ~ .
+)
+
+# Multicolinealidad
+# Calcular los factores de inflación de la varianza
+vif(modelo_logit)
+
+# Observaciones influyentes
+influencePlot(
+  modelo_logit
+)
+```
+El modelo redujo la devianza de 138.629 en el modelo nulo a 64.742 en el modelo con cuatro predictores. Esta reducción fue significativa, \(\chi^2(4)=73.887,\ p<0.001\), por lo que incorporar los predictores mejora considerablemente el ajuste. Las pruebas de curvatura presentaron valores p superiores a 0.05 para todas las variables, por lo que no existe evidencia de relaciones no lineales con el logit. Los valores VIF se encontraron entre 1.29 y 1.55, indicando que no existen problemas de multicolinealidad. Las observaciones 20 y 47 presentan los residuos más elevados y cierta influencia sobre el modelo, mientras que las observaciones 64 y 80 tienen un leverage relativamente alto; sin embargo, ninguna presenta una distancia de Cook cercana a 1. En general, el modelo presenta un buen ajuste y cumple razonablemente las condiciones necesarias, aunque las observaciones señaladas deben considerarse como una posible limitación.
+Además, cada observación corresponde a una persona diferente, por lo que la independencia se justifica meramente del diseño y del procedimiento de muestreo utilizado.
+
+
+## 6. Confiabilidad y Poder Predictivo de los modelos
+
+### Modelo para predecir el Peso
+
+El modelo de Peso presentó el mejor desempeño predictivo de los modelos lineales. Mediante bootstrap obtuvo un RMSE de 2.183 kg, un MAE de 1.633 kg y un R² de 0.974. Además, la diferencia entre el R² aparente y el obtenido mediante remuestreo fue pequeña, lo que indica que el modelo mantiene un rendimiento estable. Las condiciones de linealidad y homocedasticidad se cumplieron razonablemente; sin embargo, los residuos no presentaron normalidad, se observó multicolinealidad moderada y se identificaron algunas observaciones influyentes. Por lo tanto, el modelo posee un alto poder predictivo, aunque la interpretación individual de sus coeficientes y su confiabilidad inferencial deben realizarse con precaución.
+
+### Modelo para predecir el IMC
+
+El modelo de IMC seleccionó 17 predictores y obtuvo mediante validación cruzada repetida un RMSE de 1.379 kg/m², un MAE de 1.113 kg/m² y un R² de 0.794. Estos resultados indican que el modelo conserva una buena capacidad predictiva con observaciones no utilizadas en cada ajuste. Sin embargo, el R² disminuyó desde 0.879 en la muestra completa hasta 0.794 en la validación cruzada, mostrando cierto optimismo en el rendimiento aparente. Además, se detectaron heterocedasticidad, multicolinealidad alta y varias observaciones potencialmente influyentes. En consecuencia, el modelo permite obtener predicciones razonables del IMC, pero es menos estable y confiable que el modelo de Peso. En las lecturas se habla de la parsimonía y consideramos la opción de elegir el subconjunto más pequeño de predictores cuyo R² de validación cruzada solo se encontrara un 1% por debajo del mejor R² observado, pero como el enunciado de la actividad pide maximizar R² lo descartamos. De todas formas, creemos que vale la pena mencionar que un modelo parsimonioso con 14 predictores presentaba un R² de 0.789, con una diferencia de 0.005, conservando un 99.3% del mejor R², no obstante, por lo que exigía el enunciado mantuvimos el modelo de 17 predictores.
+
+### Modelo para predecir el estado nutricional
+
+El modelo logístico seleccionó cuatro predictores y obtuvo un AUC de 0.894 mediante LOOCV, lo que representa una buena capacidad para diferenciar entre personas con y sin sobrepeso. En la evaluación aparente alcanzó un AUC de 0.933, una exactitud de 83%, una sensibilidad de 82% y una especificidad de 84%. La diferencia entre el AUC aparente y el obtenido mediante LOOCV fue pequeña, por lo que no se observan señales fuertes de sobreajuste. Además, el modelo mejoró significativamente respecto del modelo nulo, cumplió razonablemente la condición de linealidad y no presentó problemas de multicolinealidad. Aunque se identificaron algunas observaciones potencialmente influyentes, el modelo presenta un buen nivel de ajuste y una capacidad predictiva confiable dentro de la muestra analizada.
+
+
+### Conclusión general
+
+En conclusión, las herramientas de selección automática permitieron construir modelos con un número limitado de predictores y un desempeño adecuado. El modelo de Peso presentó alto desempeño estadístico estimado mediante bootstrap, mientras que el modelo de estado nutricional consiguió una buena capacidad de clasificación utilizando solamente cuatro medidas anatómicas. El modelo de IMC también obtuvo un buen rendimiento, pero presentó mayores problemas en sus condiciones y una diferencia más evidente entre el ajuste aparente y la validación cruzada. Por lo tanto, los modelos de Peso y estado nutricional entregan resultados más confiables, mientras que las predicciones del modelo de IMC deben interpretarse con mayor precaución. Estos resultados son aplicables principalmente a personas con características semejantes a las incluidas en la muestra. Además, como se utilizó una muestra balanceada artificialmente entre personas con y sin sobrepeso, el desempeño de los modelos podría cambiar en una población con una distribución diferente. Por ello, su generalidad debería confirmarse posteriormente con datos externos.
+
+
+
