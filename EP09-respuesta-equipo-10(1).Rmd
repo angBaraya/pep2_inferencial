@@ -1,0 +1,248 @@
+---
+title: "EP09: Regresión Lineal Simple y Múltiple"
+output: html_document
+date: "2026-07-29"
+---
+
+# Regresión lineal simple y múltiple
+
+El objetivo de esta actividad es construir y evaluar modelos de regresión para predecir el peso corporal (`Weight`) a partir de medidas antropométricas obtenidas del estudio de Heinz et al. (2003).
+
+---
+
+## Preparación de los datos
+
+La semilla serán últimos cuatro dígitos del RUN del integrante menor del equipo: **1318**. Al ser un número par, trabajaremos con una muestra de **mujeres** (`Gender = 0`).
+
+```{r}
+library(car)
+
+semilla <- 1318
+datos <- read.csv2("EP09 Datos.csv", sep = ";", dec = ",", header = TRUE)
+
+dim(datos)
+
+
+mujeres <- datos[datos$Gender == 0, ]
+
+set.seed(semilla)
+idx_muestra <- sample(nrow(mujeres), 100)
+muestra <- mujeres[idx_muestra, ]
+
+# Separamos 70 casos para entrenar y 30 para evaluar
+idx_entren <- sample(nrow(muestra), 70)
+entrenamiento <- muestra[idx_entren, ]
+prueba <- muestra[-idx_entren, ]
+
+```
+
+## Selección de posibles variables predictoras
+Dejamos fuera las variables de respuesta y las excluidas por el enunciado (Weight, Height, Gender). Luego, seleccionamos 8 predictores al azar.
+
+```{r}
+
+vars_excluir <- c("Weight", "Height", "Gender")
+vars_candidatas <- setdiff(names(datos), vars_excluir)
+ 
+set.seed(semilla)
+vars_azar <- sample(vars_candidatas, 8)
+vars_resto <- setdiff(vars_candidatas, vars_azar)
+ 
+print(vars_azar)
+
+  
+```
+
+
+### Selección manual para el modelo RLS
+
+Utilizamos **Navel.Girth** (grosor a la altura del ombligo) como predictor para el modelo simple porque Fisiológicamente, el perímetro abdominal tiene una fuerte relación con la masa corporal total. Un mayor diámetro en esta zona suele reflejar mayorontextura física, por lo que resulta un predictor razonable para el peso corporal.
+
+*FUENTE: Heinz, G., Peterson, L. J., Johnson, R. W., & Kerk, C. J. (2003). Exploring relationships in body dimensions. Journal of Statistics Education, 11(2).*
+
+
+```{r}
+var_rls <- "Navel.Girth"
+
+# Verificamos la correlación inicial
+correlacion <- cor(entrenamiento[[var_rls]], entrenamiento$Weight)
+correlacion
+```
+Efectivamente parece que si hay correlación, podemos proseguir con el análisis ya que su relación no parece ser débil
+
+```{r}
+# Gráfico exploratorio
+plot(entrenamiento[[var_rls]], entrenamiento$Weight,
+     xlab = "Grosor a la altura del ombligo (cm)",
+     ylab = "Peso (kg)",
+     main = "Relación entre grosor abdominal y peso",
+     pch = 19, col = "steelblue")
+abline(lm(Weight ~ Navel.Girth, data = entrenamiento), col = "firebrick", lwd = 2)
+
+```
+
+
+### Modelo de Regresión Lineal Simple (RLS)
+```{r}
+formula_rls <- as.formula(paste("Weight ~", var_rls))
+modelo_rls  <- lm(formula_rls, data = entrenamiento)
+summary(modelo_rls)
+
+```
+
+### Exploración y Modelo Múltiple (RLM)
+Para el modelo múltiple, partimos desde el modelo RLS y utilizamos la función step() vista en la lectura para incorporar predictores de entre los 8 elegidos al azar. El criterio para agregar variables es la reducción del Criterio de Información de Akaike (AIC).
+
+```{r}
+
+formula_completa <- as.formula(
+  paste("Weight ~", paste(c(var_rls, vars_azar), collapse = " + "))
+)
+
+# Limitamos a un máximo de 4 pasos para cumplir la restricción de 2 a 5 variables
+modelo_rlm <- step(
+  modelo_rls,
+  scope = list(lower = formula_rls, upper = formula_completa),
+  direction = "forward",
+  steps = 4
+)
+
+summary(modelo_rlm)
+
+```
+
+
+La selección golosa encontró predictores útiles al modelo, logrando un mejor $R^2$ ajustado. Esto demuestra que la combinación de estas variables explica el peso de forma más precisa que el modelo simple.
+
+### Evaluación y Diagnóstico de los Modelos
+#### Casos atípicos e influyentes
+
+```{r}
+# RLS
+outlierTest(modelo_rls)
+
+# RLM
+outlierTest(modelo_rlm)
+
+#graficos
+influencePlot(modelo_rls, 
+              main = "Influencia de observaciones - Modelo Simple (RLS)", 
+              id = list(method = "cook", n = 3))
+
+influencePlot(modelo_rlm, 
+              main = "Influencia de observaciones - Modelo Múltiple (RLM)", 
+              id = list(method = "cook", n = 3))
+
+```
+
+La prueba de Bonferroni no reporta valores atípicos severos (p > 0.05) en ninguno de los modelos. Al revisar los gráficos de influencia (Distancia de Cook), no encontramos observaciones que distorsionen los resultados de manera extrema, por lo que no fue necesario eliminar datos empíricos.
+
+#### Condiciones para la regresión
+
+Para validar los modelos, evaluamos los supuestos teóricos:
+
+**Independencia:** Los casos corresponden a individuos distintos seleccionados aleatoriamente, por lo que las mediciones son independientes.
+
+```{r}
+par(mfrow = c(2, 2)) # Divide la pantalla en 4 paneles
+plot(modelo_rlm, 
+     caption = c("Residuos vs. Ajustados", "Q-Q Normal", 
+                 "Escala-Localización", "Residuos vs. Apalancamiento"))
+par(mfrow = c(1, 1)) # Restaura la pantalla a 1 panel
+
+# Gráficos de residuos parciales (del paquete car) para verificar linealidad
+residualPlots(modelo_rlm, type = "pearson", tests = FALSE, 
+              main = "Residuos parciales - RLM")
+```
+
+**Normalidad:**
+```{r}
+shapiro.test(residuals(modelo_rls))
+shapiro.test(residuals(modelo_rlm))
+```
+
+Ambas pruebas de Shapiro-Wilk arrojan valores p > 0.05, lo que nos permite mantener la hipótesis de normalidad en los residuos.
+
+**Homocedasticidad:**
+```{r}
+ncvTest(modelo_rls)
+ncvTest(modelo_rlm)
+```
+
+Ambas pruebas de varianza no constante (NCV) arrojan valores $p \le 0.05$, lo que indica el rechazo de la hipótesis de varianza constante y confirma la presencia de heterocedasticidad tanto en el modelo simple como en el múltiple. Si bien esto no invalida el poder predictivo del modelo, sí afecta la precisión teórica de los errores estándar de los coeficientes ajustados."
+
+**multicolinealidad**
+```{r}
+vif(modelo_rlm)
+```
+
+La mayoría de los valores del factor de inflación de la varianza (VIF) se mantienen por debajo de 5, indicando a lo sumo una multicolinealidad moderada. Sin embargo, la variable Chest.Girth presenta un VIF de 5.33. Valores entre 5 y 10 sugieren que la multicolinealidad es preocupante y podría afectar significativamente las estimaciones. Aunque sería recomendable investigar más a fondo o considerar su eliminación, por ahora se mantendrá el predictor dado el beneficio predictivo que aportó durante la selección del criterio AIC.
+
+### Evaluación del Poder 
+Finalmente, probamos cómo se comportan los modelos frente a los 30 casos no vistos del conjunto de prueba.
+
+```{r}
+# Función para calcular RMSE, MAE y R2
+metricas_pred <- function(reales, predichos) {
+  e <- reales - predichos
+  c(RMSE = sqrt(mean(e^2)), 
+    MAE = mean(abs(e)), 
+    R2 = 1 - sum(e^2) / sum((reales - mean(reales))^2))
+}
+
+# Predicciones
+m_rls_te <- metricas_pred(prueba$Weight, predict(modelo_rls, prueba))
+m_rlm_te <- metricas_pred(prueba$Weight, predict(modelo_rlm, prueba))
+
+tabla_comp <- data.frame(
+  Modelo = c("RLS", "RLM"),
+  RMSE_Prueba = c(m_rls_te["RMSE"], m_rlm_te["RMSE"]),
+  R2_Prueba = c(m_rls_te["R2"], m_rlm_te["R2"])
+)
+print(tabla_comp)
+
+par(mfrow = c(1, 2))
+
+# Gráfico para RLS
+plot(prueba$Weight, predict(modelo_rls, prueba),
+     xlab = "Peso real (kg)", ylab = "Peso predicho (kg)",
+     main = "RLS: Predicción vs. Real",
+     pch = 19, col = "steelblue", cex = 0.8)
+abline(0, 1, col = "firebrick", lwd = 2) # Línea ideal de predicción perfecta
+
+# Gráfico para RLM
+plot(prueba$Weight, predict(modelo_rlm, prueba),
+     xlab = "Peso real (kg)", ylab = "Peso predicho (kg)",
+     main = "RLM: Predicción vs. Real",
+     pch = 19, col = "darkgreen", cex = 0.8)
+abline(0, 1, col = "firebrick", lwd = 2)
+
+```
+
+### Validación Cruzada
+```{r}
+library(caret)
+
+set.seed(semilla)
+cv_rls <- train(formula("Weight ~ Navel.Girth"), data = entrenamiento, method = "lm", 
+                trControl = trainControl(method = "LOOCV"))
+
+cv_rlm <- train(formula(modelo_rlm), data = entrenamiento, method = "lm", 
+                trControl = trainControl(method = "LOOCV"))
+
+set.seed(semilla)
+cv_rlm_10 <- train(formula(modelo_rlm), data = entrenamiento, method = "lm", 
+                   trControl = trainControl(method = "cv", number = 10))
+
+tabla_cv <- data.frame(
+  Modelo = c("RLS (LOOCV)", "RLM (LOOCV)", "RLM (10-fold)"),
+  RMSE = c(cv_rls$results$RMSE, cv_rlm$results$RMSE, cv_rlm_10$results$RMSE),
+  R2 = c(cv_rls$results$Rsquared, cv_rlm$results$Rsquared, cv_rlm_10$results$Rsquared)
+)
+
+print(tabla_cv)
+```
+
+### Conclusión
+El analisis indicó que el diametro abdominal si es un buen estimador para el peso corporal, pero que al sumar otras medidas anatómicas como las rodillas, pecho, muslos y hombos se marcó una diferencia significativa en la precisión. El modelo RLM logró reducir el error casi a la midat (MRSE de 2.69kg frente a 5.51kg en datos no vistos). El modelo múltiple presentó violaciones a la heterocedasticidad y una multicolinealidad preocupante de 5 en un predictor, pero su generalización en el conjunto de prueba confirmó que el algoritmo goloso extrajo información relevante y valiosa, sin caer en un sobre ajuste severo. Respecto a la validación cruzada final, se corroboró que el modelo múltiple fue mas efectivo para predecir, pues también presentó un patrón de mejora frente al otro modelo, obteniendo una mejor capacidad predictiva.
+

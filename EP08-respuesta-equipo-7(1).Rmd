@@ -1,0 +1,270 @@
+---
+title: "EI-EP08-respuesta-equipo-7"
+author: "-"
+date: "2026-07-13"
+output:
+  html_document:
+    toc: true # Activa la tabla de contenidos (índice)
+    toc_float: true # Permite que el índice se mueva al hacer scroll
+    toc_depth: 3 # Define la cantidad de niveles de títulos
+    theme: flatly # Tema visual (bootstrap)
+    highlight: tango # Define el estilo del código (colores)
+    df_print: paged # Hace paginado al mostrar data frames
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo      = TRUE, # Muestra código R en el documento
+  warning   = FALSE, # Oculta advertencias
+  message   = FALSE, # Oculta mensajes (como los de carga de paquetes)
+  fig.align = "center", # Centra imágenes
+  fig.width = 7,
+  fig.height = 4 # Parámetros para el tamaño de gráficas
+)
+```
+
+```{r}
+library(tidyverse)
+library(boot)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+
+```
+---
+```{r}
+casen_2017 <- read.csv("EP08 Datos CASEN 2017.csv")
+```
+# Contexto
+la Encuesta de Caracterización Socioeconómica Nacional (Casen) es realizada por el Ministerio de Desarrollo Social de forma periódica para conocer la situación de los hogares chilenos con relación a aspectos demográficos, de educación, salud, vivienda, trabajo e ingresos. Es la principal fuente de información para estimar la magnitud de la pobreza y la distribución del ingreso en el país.
+
+Se tiene a disposición un archivo CSV con un subconjunto de los datos obtenidos en la Casen 2017. El equipo debe revisar las columnas disponibles en este archivo según la descripción en el libro de códigos de la encuesta, que también queda disponible para este ejercicio. Es importante notar que en esta encuesta hay datos de carácter colectivo sobre “el hogar” del entrevistado, pero también hay datos de carácter individual, que se refieren “al jefe o la jefa de hogar” (no al entrevistado).
+
+# Pregunta 1
+### ¿Existe una diferencia significativa en la proporción de adultos mayores (60 años o más) en la Región Metropolitana que declaran un estado de salud general "Malo" o "Muy Malo", entre aquellos que continúan trabajando (ocupados) y aquellos que están inactivos/jubilados?
+
+## Estadístico de interés
+
+Se justifica el uso de métodos para datos problemáticos (remuestreo) debido al:
+
+Incumplimiento de la condición de éxito-fracaso: En una muestra pequeña de adultos mayores (n<150), la cantidad de personas que perciben su salud como "Mala" o "Muy Mala" (el evento "éxito") suele ser reducida. Si el número de éxitos o fracasos esperados por grupo es inferior a 10, la aproximación a la normalidad de la prueba Z de proporciones pierde validez.
+
+Naturaleza de la muestra: Al trabajar con una muestra aleatoria reducida, los métodos de remuestreo (como permutaciones) permiten obtener un valor p más exacto sin depender de supuestos de distribución teórica.
+
+Principio de Intercambiabilidad: La prueba de permutaciones es válida porque, bajo la hipótesis nula, las etiquetas de los grupos ("Ocupado" e "Inactivo") son intercambiables. Esto significa que cualquier reordenamiento de los datos entre los grupos es igualmente probable si no hay una diferencia real.
+
+Percentiles vs BCa: Debido a que la muestra resultó en una nula variabilidad (0 éxitos en un grupo y 1 en el otro), el algoritmo BCa falla matemáticamente (ajuste "w" infinito). Aunque el método BCa es generalmente preferido, se optó por el método de percentiles para el intervalo de confianza, ya que es más robusto ante distribuciones con varianza extremadamente baja o nula.
+
+## Formulación de hipótesis
+
+A partir de la pregunta escogida se tiene que la población de interés son los adultos de 60 años o más residentes en la Región Metropolitana de Chile. Por otro lado, es necesario determinar la variable dependiente e independiente:
+
+Variable Independiente (Grupos): Condición de actividad (Ocupados vs. Inactivos/Jubilados).
+Variable Dependiente: Percepción de salud (Binaria: "Mala/Muy Mala" vs. "Otras").
+
+Con estos datos, se prosigue a definir las hipótesis a docimar:
+
+* $H_0: p_{\text{ocu}} - p_{\text{ina}} = 0$ No existe diferencia en la proporción de adultos mayores con salud "Mala/Muy Mala" entre ocupados e inactivos.
+* $H_A: p_{\text{ocu}} - p_{\text{ina}} \neq 0$ Existe una diferencia significativa en la proporción de salud "Mala/Muy Mala" entre ambos grupos.
+
+## Prueba estadística
+
+```{r}
+
+datos_am <- casen_2017 %>%
+  filter(region == "Región Metropolitana de Santiago", edad >= 60) %>%
+  mutate(salud_critica = ifelse(s13 %in% c("Malo", "Muy malo"), 1, 0),
+         condicion = ifelse(o1 == "Sí", "Ocupado", "Inactivo")) %>%
+  drop_na(salud_critica, condicion)
+
+# Muestreo Estratificado (100 < n < 150)
+set.seed(1234)
+n_por_grupo <- 65 
+muestra_estudio <- datos_am %>%
+  group_by(condicion) %>%
+  slice_sample(n = n_por_grupo) %>%
+  ungroup()
+
+# Verificación de condiciones 
+check <- muestra_estudio %>% group_by(condicion) %>% 
+  summarise(exitos = sum(salud_critica), n = n())
+print(check)
+
+# Estadístico observado
+p_ocu_obs <- mean(muestra_estudio$salud_critica[muestra_estudio$condicion == "Ocupado"])
+p_ina_obs <- mean(muestra_estudio$salud_critica[muestra_estudio$condicion == "Inactivo"])
+diff_obs <- p_ocu_obs - p_ina_obs
+
+# Prueba de Permutaciones Monte Carlo (Valor p)
+B <- 5999
+set.seed(1234)
+dist_nula <- replicate(B, {
+  etiquetas_perm <- sample(muestra_estudio$condicion)
+  p1 <- mean(muestra_estudio$salud_critica[etiquetas_perm == "Ocupado"])
+  p2 <- mean(muestra_estudio$salud_critica[etiquetas_perm == "Inactivo"])
+  p1 - p2
+})
+
+# Valor p bilateral con corrección de Monte Carlo
+p_valor <- (sum(abs(dist_nula) >= abs(diff_obs)) + 1) / (B + 1)
+
+# Intervalo de Confianza (Bootstrapping)
+calc_diff <- function(data, indices) {
+  d <- data[indices, ]
+  # Evita errores si una remuestra no incluye ambos grupos
+  if(length(unique(d$condicion)) < 2) return(NA) 
+  p1 <- mean(d$salud_critica[d$condicion == "Ocupado"])
+  p2 <- mean(d$salud_critica[d$condicion == "Inactivo"])
+  return(p1 - p2)
+}
+
+boot_res <- boot(muestra_estudio, statistic = calc_diff,
+                  strata = factor(muestra_estudio$condicion), R = B)
+ic_perc <- boot.ci(boot_res, conf = 0.95, type = "perc")
+
+# Resultados
+cat("Diferencia observada:", round(diff_obs, 4), "\n")
+cat("Valor p (Permutaciones):", round(p_valor, 4), "\n")
+print(ic_perc)
+```
+
+## Conclusión
+
+Con un nivel de significancia del 0,05, la prueba de permutaciones arroja un p-value de 1 (redondeado), el cual claramente es mayor que 0,05. Esto quiere decir que no existe evidencia estadística suficiente para rechazar la hipótesis nula. Por lo tanto, se concluye, con un 95% de confianza, que no hay diferencias significativas en la proporción de adultos mayores (60 años o más) en la Región Metropolitana que declaran un estado de salud "Malo" o "Muy Malo" entre el grupo de ocupados y el de inactivos/jubilados. Este resultado es consistente con el intervalo de confianza obtenido mediante bootstrapping.
+
+# Pregunta 2:
+### ¿Existen diferencias significativas en el promedio de horas semanales trabajadas entre los jefes o jefas de hogar de la Región Metropolitana, según la situación de tenencia de su vivienda (Propia pagada, Propia pagándose, o Arrendada)?
+
+Primero para responder la pregunta filtraremos los datos del archivo. Nos quedaremos con los hogares de la región metropolitana, con las columnas o10 que muestra las horas trabajadas a la semana y v9 que marca bajo qué situación ocupa el sitio en donde filtraremos solamente las propiedades: Propia pagada, Propia pagándose, o Arrendada (con o sin contrato)
+```{r}
+casen_2017 <- read.csv("EP08 Datos CASEN 2017.csv")
+rm_datos <- casen_2017 %>% filter(region == "Región Metropolitana de Santiago")
+
+rm_datos <- rm_datos %>%
+  mutate(tenencia = case_when(
+    v9 == "Propio pagado"          ~ "Propia pagada",
+    v9 == "Propio pagándose"       ~ "Propia pagándose",
+    v9 %in% c("Arrendado con contrato",
+              "Arrendado sin contrato") ~ "Arrendada",
+    TRUE ~ NA_character_
+  ))
+
+muestra <- rm_datos %>%
+  filter(!is.na(tenencia), !is.na(o10)) %>%
+  select(tenencia, o10) %>%
+  mutate(tenencia = factor(tenencia,
+                            levels = c("Propia pagada",
+                                       "Propia pagándose",
+                                       "Arrendada")))
+
+cat("Tamaño de muestra por grupo:\n")
+print(table(muestra$tenencia))
+
+```
+Ahora revisaremos el comportamiento de los datos
+```{r}
+resumen <- muestra %>%
+  group_by(tenencia) %>%
+  summarise(n = n(),
+            media = mean(o10),
+            de = sd(o10),
+            mediana = median(o10),
+            .groups = "drop")
+print(resumen)
+
+p1 <- ggplot(muestra, aes(x = tenencia, y = o10, fill = tenencia)) +
+  geom_boxplot(outlier.alpha = 0.3) +
+  labs(title = "Horas semanales trabajadas según tenencia de la vivienda (RM)",
+       x = "Tenencia de la vivienda", y = "Horas semanales trabajadas") +
+  theme_minimal() +
+  theme(legend.position = "none")
+print(p1)
+
+p2 <- ggplot(muestra, aes(x = o10)) +
+  geom_histogram(binwidth = 5, color = "white") +
+  facet_wrap(~ tenencia, ncol = 1) +
+  labs(title = "Distribución de horas trabajadas por grupo",
+       x = "Horas semanales trabajadas", y = "Frecuencia") +
+  theme_minimal()
+print(p2)
+
+```
+La varible de horas trabajas se concentra en 44-45 horas, que equivale a una jordana laboral completa pero se tiene una cantidad no despreciable de valores atípicos. Por lo que se viola el supuesto de normalidad exigido por ANOVA. Se deberia optar método de remuestreo ya que no se requiere suponer de la distribución y es robusto frente a la asimetría de datos, funcionaria bien para los valores atípicos detectados. 
+
+
+## Formulación de hipótesis
+
+ Sean $\mu_{PP}$, $\mu_{PPD}$ y $\mu_A$ las medias poblacionales de horas semanales trabajadas por los jefes/as de hogar de la RM cuya vivienda es, respectivamente, Propia pagada, Propia pagándose y Arrendada.
+
+* $H_0$: El promedio de horas trabajas es igual en tres situaciones de tenencia de la vivienda. Matematicamente:$H_0: \mu_{\text{PP}} = \mu_{\text{PPD}} = \mu_{\text{A}}$
+
+* $H_1$: Al menos una de las medias difiere de las demas en el promedio de horas trabajas. Matematicamente:  $H_1: \exists \, i, j \in \{\text{PP}, \text{PPD}, \text{A}\}, i \neq j \mid \mu_i \neq \mu_j$
+
+## Estadístico de interés
+
+Dado que las variables no siguen el supuesto de normalidad y homogeneidad de varianzasas, las pruebas paramétricas tradicionales pueden entregar resultados sesgados, por lo que para responder esta pregunta se utilizara el estadístico F de un ANOVA de un factor que se puede remuestrear sin depender de la distribución F teorica.
+
+
+## Prueba estadística
+Primero calculamos el valor F del ANOVA con los datos originales 
+```{r}
+
+calcular_F <- function(valores, grupos) {
+  medias_grupo <- tapply(valores, grupos, mean)
+  n_grupo <- tapply(valores, grupos, length)
+  media_general <- mean(valores)
+  k <- length(medias_grupo)
+  n_total <- length(valores)
+
+  sc_entre <- sum(n_grupo * (medias_grupo - media_general)^2)
+  sc_dentro <- sum(tapply(valores, grupos,
+                           function(x) sum((x - mean(x))^2)))
+
+  gl_entre <- k - 1
+  gl_dentro <- n_total - k
+
+  (sc_entre / gl_entre) / (sc_dentro / gl_dentro)
+}
+
+F_observado <- calcular_F(muestra$o10, muestra$tenencia)
+cat("\nEstadístico F observado:", F_observado, "\n")
+
+```
+
+Realizamos el remuestreo que en lugar de depender de supuestos, extraer repetidamente muestras desde el conjunto original de datos para obtener información sobre la población.El proceso de extraer muestras se repetira 5mil veces y en cada repetición se calcula un nuevo valor de F en base a los datos que fueron extraidos. Luego a partir de esos 5mil valores se crea el histograma que representa todos los valores de F. Finalmente los 5mil valores calculados se compara con el F calculado anteriormente y se calcula el valor de p que es el número de veces que los datos barajadps dieron un resultado igual a F. 
+
+```{r}
+B <- 5000
+F_permutados <- numeric(B)
+
+valores <- muestra$o10
+etiquetas <- muestra$tenencia
+
+for (i in 1:B) {
+  etiquetas_perm <- sample(etiquetas)      
+  F_permutados[i] <- calcular_F(valores, etiquetas_perm)
+}
+
+r <- sum(F_permutados >= F_observado)
+R_rep <- B # 5000
+p_valor <- (r + 1) / (R_rep + 1)
+
+cat("p-valor obtenido por permutación (B =", B, "):", p_valor, "\n")
+
+df_perm <- data.frame(F = F_permutados)
+p3 <- ggplot(df_perm, aes(x = F)) +
+  geom_histogram(bins = 40, color = "white", fill = "steelblue") +
+  geom_vline(xintercept = F_observado, color = "red",
+             linetype = "dashed", linewidth = 1) +
+  labs(title = "Distribución nula del estadístico F (permutación)",
+       subtitle = paste0("F observado = ", round(F_observado, 2),
+                          " (línea roja)"),
+       x = "F", y = "Frecuencia") +
+  theme_minimal()
+print(p3)
+```
+
+## Conclusión
+
+Como se obtuvo un p-value = 0,00019996 < 0,0002 < 0.05 = alfa en la prueba de permutaciones para el estadístico F, existe evidencia estadística suficiente para rechazar la hipótesis nula. Se concluye, con un 95% de confianza, que existen diferencias significativas en el promedio de horas semanales trabajadas por los jefes o jefas de hogar de la Región Metropolitana dependiendo de la situación de tenencia de su vivienda (Propia pagada, Propia pagándose o Arrendada).
+

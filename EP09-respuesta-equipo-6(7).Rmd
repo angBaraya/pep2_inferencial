@@ -1,0 +1,258 @@
+---
+title: "EP09-respuesta-equipo-6"
+author: "Equipo 6"
+date: "2026-07-29"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo      = TRUE,
+  warning   = FALSE,
+  message   = FALSE,
+  fig.align = "center",
+  fig.width = 7,
+  fig.height = 4
+)
+
+paquetes <- c("boot", "car", "caret", "ggfortify", "ggplot2", 
+  "ggpubr", "grid", "gridExtra", "gmodels", "ez", "emmeans", "infer", 
+  "kableExtra", "Hmisc", "knitr", "leaps", "lmtest", "lsmeans", 
+  "multcomp", "nlme", "plyr", "pROC", "purrr", "pwr", "readr", 
+  "scatterplot3d", "psych", "TeachingDemos", "tibble", "tidyr","nortest", "dplyr", "MASS")
+
+install_if_missing <- function(p) {
+  if (!require(p, character.only = TRUE)) {
+    install.packages(p)
+    library(p, character.only = TRUE)
+  }
+}
+invisible(sapply(paquetes, install_if_missing))
+library(conflicted)
+conflicts_prefer(dplyr::select)
+conflicts_prefer(dplyr::filter)
+conflicts_prefer(dplyr::mutate)
+conflicts_prefer(dplyr::pmap())
+conflicts_prefer(dplyr::summarise())
+```
+
+---
+
+## Preparación de los datos
+
+```{r}
+
+datos = read.csv2("EP09 Datos.csv")
+head(datos)
+
+# Parte 1 - semilla
+set.seed(2706)
+
+# Parte 2 - muestra aleatoria (mujeres en este caso)
+
+datos_mujer = datos |> filter(Gender==0)
+head(datos_mujer)
+muestra = datos_mujer |> slice_sample(n=100)
+head(muestra)
+# separación
+datos_entrenamiento = muestra |> slice(1:70)
+datos_evaluacion = muestra |> slice(71:100)
+
+# Parte 3 - elegir variables
+variables_a_excluir = c("Gender", "Height", "Weight")
+
+# 2. Obtener el conjunto de variables disponibles
+variables_disponibles = setdiff(names(muestra), variables_a_excluir)
+
+# 3. Seleccionar 8 variables sin reemplazo
+variables_seleccionadas = sample(variables_disponibles, size = 8, replace = FALSE)
+
+# Mostrar las variables seleccionadas
+print(variables_seleccionadas)
+```
+
+Seleccionaremos una variable que consideremos útil para predecir la variable peso. Elegimos la variable Waist.Girth, porque la cintura es uno de los lugares en donde más se concentra grasa, entonces un cambio pequeño en su grosor significa mucho mayor peso. Sigue siendo un problema que no podemos considerar la estatura, pero es suficientemente buena la medición igualmente.
+
+## Modelo de regresión lineal simple
+
+```{r}
+# modelo de regresión lineal simple
+modelo_simple = lm(Weight ~ Waist.Girth, data = datos_entrenamiento)
+
+# resumen estadístico del modelo
+summary(modelo_simple)
+```
+
+Con un Pr(>|t|) para Waist.Girth de 2*10^-16 y un valor R^2 de 0.6825, calificamos al ancho de la cintura como un predictor robusto para la variable peso.
+
+El modelo de regresión lineal queda representado por la ecuación:
+
+Weight = -13.40655 + 1.04247*Waist.Girth.
+
+Como Waist.Girth está medido en centímetros, podemos decir que según la ecuación por cada 1 centímetro más de grosor de cintura aproximadamente el peso de la mujer aumenta 1.04 cm.
+
+Observamos también un error estándar de 4.494, lo que significa que la predicción realizada con el modelo en promedio se desvía 4.5 kilos del peso real observado.
+
+## Selección de mejores variables para el modelo de RLM
+
+Evaluamos todas las combinaciones posibles con regresión exhaustiva con regsubsets(), nvmax = 6 y fornce.in = "Waist.Girth" para que el buscador siempre parta del modelo RLS. Así nunca evaluara mas de 5 variables adicionales, que es lo que pide el enunciado: "entre 2 y 5 predictores nuevos".
+
+```{r}
+# Elección de mejores variables para construir el modelo.
+
+# Construir una cadena de texto con las 8 variables seleccionadas aleatoriamente
+predictores_candidatos = paste(variables_seleccionadas, collapse = " + ")
+
+# Definir la fórmula del modelo límite superior (modelo completo)
+# Incluye el predictor inicial (Waist.Girth) más los 8 candidatos
+formula_completa = as.formula(paste("Weight ~ Waist.Girth +", predictores_candidatos))
+
+combinaciones = regsubsets(formula_completa,
+                           data = datos_entrenamiento,
+                           nbest = 1,
+                           nvmax = 6,
+                           force.in = "Waist.Girth",
+                           method = "exhaustive")
+plot(combinaciones)
+
+resumen_combinaciones = summary(combinaciones)
+
+# total (Waist.Girth + entre 2 y 5 variables adicionales)
+tamanos_permitidos = 3:6
+i_bic_minimo = tamanos_permitidos[which.min(resumen_combinaciones[["bic"]][tamanos_permitidos])]
+i_r2a_maximo = tamanos_permitidos[which.max(resumen_combinaciones[["adjr2"]][tamanos_permitidos])]
+
+mejor_comb_bic = resumen_combinaciones[["which"]][i_bic_minimo, ]
+mejor_comb_r2a = resumen_combinaciones[["which"]][i_r2a_maximo, ]
+
+# Extraemos las variables seleccionadas (sacando el intercepto)
+comb_mejor_bic = names(mejor_comb_bic[mejor_comb_bic == TRUE])
+comb_mejor_bic = setdiff(comb_mejor_bic, "(Intercept)")
+comb_mejor_r2a = names(mejor_comb_r2a[mejor_comb_r2a == TRUE])
+comb_mejor_r2a = setdiff(comb_mejor_r2a, "(Intercept)")
+
+comb_mejor_bic
+comb_mejor_r2a
+
+# Con el criterio BIC construimos el modelo de RLM definitivo:
+formula_optimizada = as.formula(paste("Weight ~", paste(comb_mejor_bic, collapse = " + ")))
+modelo_optimizado = lm(formula_optimizada, data = datos_entrenamiento)
+summary(modelo_optimizado)
+```
+
+BIC y R^2 ajustado eligieron el mismo subconjunto de variables: Biiliac.diameter, Shoulder.Girth, Knee.Girth, Calf.Maximum.Girth y Navel.Girth (5 predictores nuevos, el máximo permitido). Al coincidir ambos criterios, no hubo que elegir entre uno u otro.
+
+El modelo mejora bastante respecto al RLS: R^2 ajustado sube de 0,6825 a 0,9054 y el error estándar residual baja de 4,494 a 2,435 kg. Todos los predictores son significativos (p < 0,05).
+
+Falta confirmar en el punto 7 que el modelo cumple las condiciones de RLM (sobre todo la multicolinealidad, ya que varias de estas variables miden tamaño corporal y podrían estar correlacionadas entre sí).
+
+## Evaluación de bondad de ajuste y condiciones para RLM
+
+Se evalúa la bondad de ajuste (incluyendo el análisis de casos atípicos y casos influyentes) y la generalidad (condiciones para RLM) de los modelos y se busca "arreglarlos" en caso de que presenten algún problema.
+
+### Modelo de regresión lineal simple
+
+```{r}
+# linealidad
+residualPlots(modelo_simple,
+              id = list(n = 3, cex = 0.7, location = "lr"),
+              col = "steelblue2",
+              pch = 20, col.quad = "steelblue4")
+# atípicos
+outlierTest(modelo_simple)
+# independencia
+durbinWatsonTest(modelo_simple)
+# normalidad
+shapiro.test(resid(modelo_simple))
+# homocedasticidad
+ncvTest(modelo_simple)
+# influencia
+casos_influyentes = influencePlot(modelo_simple, id = list(cex = 0.7))
+casos_influyentes
+```
+
+El modelo simple cumple las 4 condiciones a nivel 0,05 Ya que no hay curvatura (Tukey p = 0,25), los residuos son independientes (Durbin-Watson p = 0,42), normales (Shapiro-Wilk p = 0,54) y la varianza es razonablemente constante (ncvTest p = 0,067, cerca del límite pero no significativo). outlierTest tampoco encuentra atípicos significativos tras corregir por Bonferroni.
+
+El influencePlot sí marca el caso 6 como potencialmente influyente (Hat = 0,29, CookD = 0,71, muy por sobre el resto). Probamos el modelo sin ese caso para ver si cambia algo:
+
+```{r}
+modelo_simple_sin6 = lm(Weight ~ Waist.Girth, data = datos_entrenamiento[-6, ])
+
+# Comparación de coeficientes y R^2 con y sin el caso 6
+cat("Sin caso 6:")
+summary(modelo_simple_sin6)
+cat("Con caso 6:")
+summary(modelo_simple)
+```
+
+Sin el caso 6, la pendiente sube de 1,04 a 1,14 y el R^2 baja apenas de 0,68 a 0,66. El caso 6 mueve un poco los coeficientes, pero no cambia las conclusiones del modelo. Por eso mantenemos modelo_simple con todos los datos, teniendo en cuenta este riesgo.
+
+### Modelo de regresión lineal múltiple
+
+Hacemos el mismo procedimiento más vif().
+
+```{r}
+# linealidad
+residualPlots(modelo_optimizado,
+              id = list(n = 3, cex = 0.7, location = "lr"),
+              col = "steelblue2",
+              pch = 20,
+              col.quad = "steelblue4")
+# atípicos
+outlierTest(modelo_optimizado)
+# independencia
+durbinWatsonTest(modelo_optimizado)
+# normalidad
+shapiro.test(resid(modelo_optimizado))
+# homocedasticidad
+ncvTest(modelo_optimizado)
+# influencia
+casos_influyentes_rlm = influencePlot(modelo_optimizado, id = list(cex = 0.7))
+casos_influyentes_rlm
+vif(modelo_optimizado)
+```
+
+El modelo múltiple también cumple las 4 condiciones a nivel 0,05: no hay curvatura (Tukey p = 0,236), los residuos son independientes (Durbin-Watson p = 0,816), normales (Shapiro-Wilk p = 0,815) y la varianza es razonablemente constante (ncvTest p = 0,074, cerca del límite pero no significativo). outlierTest tampoco encuentra atípicos significativos tras corregir por Bonferroni (caso 47 con p ajustado = 0,506). El VIF de todos los predictores está entre 1,7 y 3,8, bien por debajo del umbral de 5, así que no hay multicolinealidad preocupante.
+
+El influencePlot marca tres casos (6, 47 y 53), pero el caso 53 es el más influyente (Hat = 0,30, CookD = 0,38, el más alto de los tres). Probando el modelo sin este caso para revisar si cambia algo:
+
+```{r}
+modelo_optimizado_sin53 = lm(formula_optimizada, data = datos_entrenamiento[-53, ])
+cat("Sin caso 53:")
+summary(modelo_optimizado_sin53)
+cat("Con caso 53:")
+summary(modelo_optimizado)
+```
+
+Sin el caso 53, la mayoría de los coeficientes cambia poco, pero Biiliac.diameter sube de 0,43 a 0,60 y Navel.Girth deja de ser significativo (p pasa de 0,030 a 0,057). El R^2 casi no cambia (0,914 a 0,919). El caso 53 mueve algunos coeficientes y la significancia de un predictor, pero no cambia las conclusiones generales del modelo. Por eso de manera similar que el modelo simple. Mantenemos modelo_optimizado con todos los datos.
+
+## Poder predictivo
+
+Comparamos modelo_simple y modelo_optimizado usando los 30 casos de datos_evaluacion (nunca vistos al construirlos).
+
+```{r}
+# RLS
+rmse_entrenamiento_rls = sqrt(mean(resid(modelo_simple)**2))
+predicciones_rls = predict(modelo_simple, datos_evaluacion)
+error_rls = datos_evaluacion[["Weight"]] - predicciones_rls
+rmse_prueba_rls = sqrt(mean(error_rls**2))
+cat("RLS - RMSE entrenamiento:", rmse_entrenamiento_rls, "\n")
+cat("RLS - RMSE evaluación:", rmse_prueba_rls, "\n")
+
+# RLM
+rmse_entrenamiento_rlm = sqrt(mean(resid(modelo_optimizado)**2))
+predicciones_rlm = predict(modelo_optimizado, datos_evaluacion)
+error_rlm = datos_evaluacion[["Weight"]] - predicciones_rlm
+rmse_prueba_rlm = sqrt(mean(error_rlm**2))
+cat("RLM - RMSE entrenamiento:", rmse_entrenamiento_rlm, "\n")
+cat("RLM - RMSE evaluación:", rmse_prueba_rlm, "\n")
+```
+
+Vemos que RLM generaliza mejor que el RLS ya que su RMSE sube solo de 2,31 a 2,58 al pasar a datos nuevos, mientras que el RLS sube de 4,43 a 6,13, un salto bastante mayor. Además, comparando ambos modelos en el conjunto de evaluación, el RLM tiene un RMSE mucho menor que el RLS (2,58 vs. 6,13), confirmando que agregar los 5 predictores no solo mejoró el ajuste en entrenamiento, sino que también entrega mejores predicciones para casos no vistos.
